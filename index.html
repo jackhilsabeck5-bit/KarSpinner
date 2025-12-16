@@ -1,0 +1,177 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Image Spinner</title>
+  <style>
+    body { font-family: -apple-system, system-ui; margin: 16px; }
+    #wheel { width: 320px; height: 320px; border-radius: 50%; border: 2px solid #000; overflow: hidden; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; align-items:center; }
+    button, input, select { font-size: 16px; padding: 10px 12px; }
+    #result img { max-width: 120px; border-radius: 12px; }
+    small { opacity: .7; }
+  </style>
+</head>
+<body>
+  <h2>Image Spinner</h2>
+  <canvas id="wheel" width="320" height="320"></canvas>
+
+  <div class="row">
+    <input id="picker" type="file" accept="image/*" multiple />
+    <button id="spin">Spin</button>
+    <button id="clear">Clear</button>
+  </div>
+
+  <div class="row">
+    <input id="presetName" placeholder="Preset name (e.g., Dinner)" />
+    <button id="savePreset">Save Preset</button>
+    <select id="presetSelect"></select>
+    <button id="loadPreset">Load</button>
+    <button id="deletePreset">Delete</button>
+  </div>
+
+  <div class="row">
+    <small id="status">Ready.</small>
+  </div>
+
+  <div id="result" style="margin-top:12px;"></div>
+
+<script>
+// ---------- Settings ----------
+const THUMB_SIZE = 256;      // stored image max dimension (try 256–384)
+const JPEG_QUALITY = 0.75;   // 0.6–0.85 is a good range
+// ----------------------------
+
+const canvas = document.getElementById("wheel");
+const ctx = canvas.getContext("2d");
+const picker = document.getElementById("picker");
+const result = document.getElementById("result");
+const statusEl = document.getElementById("status");
+
+const presetNameEl = document.getElementById("presetName");
+const presetSelect = document.getElementById("presetSelect");
+
+let items = []; // {name, dataUrl, img}
+let angle = 0;
+let spinning = false;
+
+// ---------- IndexedDB helpers ----------
+const DB_NAME = "spinnerDB";
+const DB_VER = 1;
+const STORE = "presets";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VER);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: "name" }); // {name, items:[{name,dataUrl}]}
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbPutPreset(name, presetItems) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put({ name, items: presetItems });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbGetPreset(name) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).get(name);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbDeletePreset(name) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(name);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbListPresetNames() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const store = tx.objectStore(STORE);
+    const names = [];
+    const req = store.openCursor();
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (!cur) { resolve(names.sort((a,b)=>a.localeCompare(b))); return; }
+      names.push(cur.key);
+      cur.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ---------- Image resize/compress ----------
+async function fileToCompressedDataUrl(file) {
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = URL.createObjectURL(file);
+  });
+
+  const w = img.width, h = img.height;
+  const scale = Math.min(1, THUMB_SIZE / Math.max(w, h));
+  const nw = Math.max(1, Math.round(w * scale));
+  const nh = Math.max(1, Math.round(h * scale));
+
+  const c = document.createElement("canvas");
+  c.width = nw; c.height = nh;
+  const cctx = c.getContext("2d");
+  cctx.drawImage(img, 0, 0, nw, nh);
+
+  URL.revokeObjectURL(img.src);
+  return c.toDataURL("image/jpeg", JPEG_QUALITY);
+}
+
+// ---------- Wheel logic ----------
+function setStatus(msg) { statusEl.textContent = msg; }
+
+function addDataUrl(dataUrl, name, saveLastAfter=true) {
+  const img = new Image();
+  img.onload = () => draw();
+  img.src = dataUrl;
+  items.push({ name, dataUrl, img });
+  if (saveLastAfter) localStorage.setItem("lastPresetName", "");
+}
+
+function clearWheel() {
+  items = [];
+  angle = 0;
+  result.innerHTML = "";
+  draw();
+}
+
+function loadWheelData(arr) {
+  clearWheel();
+  for (const o of arr) addDataUrl(o.dataUrl, o.name, false);
+  draw();
+}
+
+function draw() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if (items.length === 0) {
+    ctx.font = "16px -apple-system, system-ui";
+    ctx.fillText
